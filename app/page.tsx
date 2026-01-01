@@ -16,6 +16,7 @@ export default function GamePage() {
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
   const [logs, setLogs] = useState<any[]>([]);
+  // 这里明确定义 player 初始可能为 null
   const [player, setPlayer] = useState<any>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -46,7 +47,8 @@ export default function GamePage() {
 
     // 乐观更新 UI
     const tempLog = { id: Date.now(), action: action, narrative: '...', isTemp: true };
-    setLogs(prev => [...prev, tempLog]);
+    // 修复点 1: 显式告诉 TS，prev 是一个数组
+    setLogs((prev: any[]) => [...prev, tempLog]);
 
     try {
       const res = await fetch('/api/game/act', {
@@ -55,9 +57,12 @@ export default function GamePage() {
       });
       const data = await res.json();
 
-      setPlayer(prev => ({ ...prev, ...data.state }));
-      setLogs(prev => prev.map(l => l.id === tempLog.id ? { ...l, narrative: data.narrative, isTemp: false } : l));
-    } catch (e) {
+      // 修复点 2: 显式告诉 TS，prev 是任意类型 (any)
+      setPlayer((prev: any) => ({ ...prev, ...data.state }));
+      
+      // 修复点 3: 显式告诉 TS，prev 是数组
+      setLogs((prev: any[]) => prev.map(l => l.id === tempLog.id ? { ...l, narrative: data.narrative, isTemp: false } : l));
+    } catch (e: any) { // 修复点 4: 捕获错误时也标记为 any
       alert("连接断开");
     } finally {
       setLoading(false);
