@@ -1,0 +1,15 @@
+name: World Tick (1 Hour)
+
+on:
+  schedule:
+    - cron: '0 * * * *' # 每整点触发
+  workflow_dispatch: # 允许手动触发
+
+jobs:
+  tick:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Vercel Cron
+        run: |
+          curl -X POST ${{ secrets.VERCEL_APP_URL }}/api/cron/world-tick \
+          -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}"
