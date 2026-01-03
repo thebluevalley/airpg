@@ -2,9 +2,8 @@
 
 import { useState, useEffect, useRef } from 'react';
 import { createClient } from '@supabase/supabase-js';
-import { Map, Backpack, Hammer, Send, Loader2, Zap } from 'lucide-react';
+import { Map, Backpack, User, Zap, Shield, Sparkles, Scroll } from 'lucide-react';
 
-// 初始化 Supabase
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
   process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
@@ -13,236 +12,193 @@ const supabase = createClient(
 const DEMO_USER_ID = 'demo-user-001';
 
 export default function GamePage() {
-  const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
   const [logs, setLogs] = useState<any[]>([]);
   const [player, setPlayer] = useState<any>(null);
-  // 默认推荐动作
-  const [suggestions, setSuggestions] = useState<string[]>(["观察四周", "检查身体状态", "整理背包"]);
+  const [showStats, setShowStats] = useState(false); // 属性面板开关
+  
+  // AI 生成的选项，不再是硬编码的
+  const [options, setOptions] = useState<any[]>([
+      { label: "醒来，观察四周", type: "explore", risk: "none" }
+  ]);
+  
   const scrollRef = useRef<HTMLDivElement>(null);
 
-  // 1. 初始化数据加载
   useEffect(() => {
-    const fetchInit = async () => {
-      // 获取玩家最新状态
-      const { data: p } = await supabase
-        .from('players')
-        .select('*')
-        .eq('user_id', DEMO_USER_ID)
-        .single();
-      
+    const init = async () => {
+      const { data: p } = await supabase.from('players').select('*').eq('user_id', DEMO_USER_ID).single();
       if (p) setPlayer(p);
-      
-      // 获取历史日志
-      const { data: l } = await supabase
-        .from('game_logs')
-        .select('*')
-        .eq('player_id', p?.id)
-        .order('created_at', { ascending: true })
-        .limit(30);
-        
+      const { data: l } = await supabase.from('game_logs').select('*').eq('player_id', p?.id).order('created_at', { ascending: true }).limit(30);
       if (l) setLogs(l);
     };
-    fetchInit();
+    init();
   }, []);
 
-  // 2. 日志自动滚动到底部
   useEffect(() => {
-    if (scrollRef.current) {
-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-    }
+    if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
   }, [logs]);
 
-  // 3. 处理动作发送 (支持手动输入和自动模式)
-  const handleAction = async (actionText: string, isAuto: boolean = false) => {
+  // 核心交互：点击选项
+  const handleChoice = async (opt: any) => {
     if (loading) return;
-    
-    // 如果是手动输入且为空，则不执行
-    if (!isAuto && !actionText.trim()) return;
-
     setLoading(true);
-    setInput(''); // 清空输入框
 
-    // 乐观 UI 更新：先在界面上显示“正在执行...”
-    const displayAction = isAuto ? "⚡️ 自动决策中..." : actionText;
-    const tempLog = { id: Date.now(), action: displayAction, narrative: '...', isTemp: true };
-    
-    // 使用函数式更新，避免依赖闭包中的旧 state
-    setLogs((prev: any[]) => [...prev, tempLog]);
+    // 乐观更新
+    const tempLog = { id: Date.now(), action: opt.label, narrative: '...', isTemp: true };
+    setLogs(prev => [...prev, tempLog]);
 
     try {
       const res = await fetch('/api/game/act', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ 
-            action: actionText,
-            autoMode: isAuto 
-        }),
+        body: JSON.stringify({ choice: opt.label, type: opt.type }),
       });
       const data = await res.json();
 
-      // 更新玩家状态 (包括 HP, 位置, 时间, Buff, 技能)
-      setPlayer((prev: any) => ({ ...prev, ...data.state }));
+      setPlayer(prev => ({ ...prev, ...data.state }));
+      setLogs(prev => prev.map(l => l.id === tempLog.id ? { ...l, narrative: data.narrative, isTemp: false } : l));
       
-      // 更新日志内容
-      setLogs((prev: any[]) => prev.map(l => 
-        l.id === tempLog.id 
-          ? { 
-              ...l, 
-              // 如果是自动模式，显示 AI 决定的具体动作；否则显示玩家输入的动作
-              action: isAuto ? `⚡️ 自动: ${data.state.location}行动` : actionText, 
-              narrative: data.narrative, 
-              isTemp: false 
-            } 
-          : l
-      ));
-      
-      // 更新智能推荐按钮
-      if (data.suggestions && data.suggestions.length > 0) {
-          setSuggestions(data.suggestions);
+      // 更新为 AI 思考后的新选项
+      if (data.options && data.options.length > 0) {
+          setOptions(data.options);
       }
-
     } catch (e) {
-      alert("与世界的连接断开了（网络错误）");
+      alert("连接断开");
     } finally {
       setLoading(false);
     }
   };
 
-  // 加载中状态
-  if (!player) return <div className="flex h-screen items-center justify-center bg-slate-950 text-slate-400"><Loader2 className="animate-spin" /></div>;
+  if (!player) return <div className="bg-slate-950 h-screen w-full flex items-center justify-center text-slate-500">Loading World...</div>;
 
   return (
     <div className="flex flex-col h-[100dvh] w-full max-w-md mx-auto bg-slate-950 text-slate-200 font-sans overflow-hidden shadow-2xl relative">
       
-      {/* --- 顶部状态栏 (Header) --- */}
-      <header className="flex justify-between items-start p-4 bg-slate-950/90 backdrop-blur-md border-b border-slate-800 z-20 absolute top-0 w-full min-h-[80px]">
-        
-        {/* 左侧：地点与技能 */}
-        <div className="flex flex-col gap-1 max-w-[50%]">
-            <div>
-              <span className="text-[10px] text-slate-500 font-bold tracking-widest uppercase block">LOCATION</span>
-              <span className="text-sm font-serif font-bold text-slate-100">{player.location}</span>
-            </div>
-            
-            {/* 技能展示区 */}
-            {player.skills && Object.keys(player.skills).length > 0 && (
-              <div className="flex gap-1 flex-wrap mt-1">
-                 {Object.entries(player.skills).map(([name, level]) => (
-                   <span key={name} className="text-[10px] px-1.5 py-0.5 bg-indigo-950 text-indigo-300 rounded border border-indigo-900/50 whitespace-nowrap">
-                     {name} Lv.{level as number}
-                   </span>
-                 ))}
-              </div>
-            )}
-        </div>
-
-        {/* 右侧：状态、时间与 Buff */}
-        <div className="flex flex-col items-end gap-1 max-w-[50%]">
-             {/* 基础数值 */}
-             <div className="text-right">
-                <span className="text-[10px] text-emerald-500 font-bold uppercase block">STATUS</span>
-                <span className="text-xs font-mono text-slate-400">HP:{player.hp}</span>
-             </div>
-
-             {/* 时间显示 */}
-             <div className="flex flex-col items-end gap-1">
-                <span className={`text-xs px-2 py-0.5 rounded-full font-bold ${
-                    player.time_of_day === '深夜' ? 'bg-purple-950 text-purple-300 border border-purple-900' : 
-                    player.time_of_day === '黄昏' ? 'bg-orange-950 text-orange-300 border border-orange-900' : 
-                    player.time_of_day === '正午' ? 'bg-yellow-950 text-yellow-300 border border-yellow-900' : 
-                    'bg-sky-950 text-sky-300 border border-sky-900'
-                }`}>
-                    {player.time_of_day || '清晨'}
-                </span>
-
-                {/* Buff 列表 */}
-                <div className="flex gap-1 flex-wrap justify-end">
-                  {player.buffs?.map((buff: string) => (
-                     <span key={buff} className="text-[10px] px-1.5 py-0.5 bg-rose-950 text-rose-300 rounded border border-rose-900/50">
-                       {buff}
-                     </span>
-                  ))}
+      {/* --- 属性面板 Modal --- */}
+      {showStats && (
+        <div className="absolute inset-0 z-50 bg-slate-950/90 backdrop-blur flex items-center justify-center p-6" onClick={() => setShowStats(false)}>
+            <div className="bg-slate-900 border border-slate-700 p-6 rounded-xl w-full max-w-sm shadow-2xl" onClick={e => e.stopPropagation()}>
+                <h3 className="text-xl font-bold text-amber-500 mb-4 flex items-center gap-2"><User /> 角色状态</h3>
+                
+                <div className="grid grid-cols-2 gap-4 mb-4">
+                    <div className="bg-slate-800 p-3 rounded text-center">
+                        <div className="text-slate-400 text-xs uppercase">Level</div>
+                        <div className="text-2xl font-mono text-white">{player.level}</div>
+                    </div>
+                    <div className="bg-slate-800 p-3 rounded text-center">
+                        <div className="text-slate-400 text-xs uppercase">EXP</div>
+                        <div className="text-lg font-mono text-white">{player.exp}</div>
+                    </div>
                 </div>
-             </div>
+
+                <div className="space-y-3">
+                    <div className="flex justify-between border-b border-slate-800 pb-1">
+                        <span className="text-slate-400">力量 (STR)</span>
+                        <span className="font-mono text-orange-400">{player.attributes?.str || 5}</span>
+                    </div>
+                    <div className="flex justify-between border-b border-slate-800 pb-1">
+                        <span className="text-slate-400">敏捷 (DEX)</span>
+                        <span className="font-mono text-green-400">{player.attributes?.dex || 5}</span>
+                    </div>
+                    <div className="flex justify-between border-b border-slate-800 pb-1">
+                        <span className="text-slate-400">智力 (INT)</span>
+                        <span className="font-mono text-blue-400">{player.attributes?.int || 5}</span>
+                    </div>
+                </div>
+
+                <div className="mt-6">
+                    <h4 className="text-sm font-bold text-slate-500 mb-2 uppercase">背包</h4>
+                    <div className="flex flex-wrap gap-2">
+                        {player.inventory?.length ? player.inventory.map((item: string, i: number) => (
+                            <span key={i} className="text-xs bg-slate-800 px-2 py-1 rounded text-slate-300 border border-slate-700">{item}</span>
+                        )) : <span className="text-xs text-slate-600">空空如也</span>}
+                    </div>
+                </div>
+            </div>
+        </div>
+      )}
+
+      {/* --- 顶部 HUD --- */}
+      <header className="absolute top-0 w-full z-10 p-4 bg-gradient-to-b from-slate-950 to-transparent">
+        <div className="flex justify-between items-start">
+            <div className="flex flex-col">
+                <span className="text-[10px] text-slate-500 font-bold tracking-widest uppercase">LOCATION</span>
+                <span className="text-lg font-serif font-bold text-slate-100 drop-shadow-md">{player.location}</span>
+            </div>
+            <div className="flex items-center gap-3">
+                 <div className="text-right">
+                    <div className="text-[10px] text-emerald-500 font-bold">HP</div>
+                    <div className="text-xl font-mono leading-none">{player.hp}</div>
+                 </div>
+                 <div className="w-10 h-10 rounded-full bg-slate-800 border border-slate-600 flex items-center justify-center cursor-pointer hover:bg-slate-700 transition" onClick={() => setShowStats(true)}>
+                    <User className="w-5 h-5 text-slate-400" />
+                 </div>
+            </div>
         </div>
       </header>
 
-      {/* --- 中央日志流 (Log Stream) --- */}
-      <div ref={scrollRef} className="flex-1 w-full overflow-y-auto pt-24 pb-48 px-4 space-y-8 scroll-smooth">
+      {/* --- 日志区域 --- */}
+      <div ref={scrollRef} className="flex-1 w-full overflow-y-auto pt-24 pb-64 px-5 space-y-6 scroll-smooth">
         {logs.map((log) => (
-          <div key={log.id} className={`flex flex-col gap-2 ${log.isTemp ? 'opacity-50' : 'opacity-100 transition-opacity duration-500'}`}>
-            {/* 动作分割线 */}
-            <div className="flex justify-center items-center gap-2">
-                <div className="h-px bg-slate-800 w-8"></div>
-                <span className="text-[10px] uppercase tracking-widest text-slate-600">
-                    {log.action}
+          <div key={log.id} className="flex flex-col gap-2 animate-in fade-in slide-in-from-bottom-4 duration-500">
+            <div className="flex items-center gap-2 opacity-70">
+                <span className={`text-[10px] uppercase font-bold px-2 py-0.5 rounded ${
+                    log.action.includes('战斗') ? 'bg-red-900/50 text-red-300' : 
+                    log.action.includes('制作') ? 'bg-amber-900/50 text-amber-300' :
+                    'bg-slate-800 text-slate-400'
+                }`}>
+                    决策
                 </span>
-                <div className="h-px bg-slate-800 w-8"></div>
+                <span className="text-xs text-slate-500 font-bold">{log.action}</span>
             </div>
-            
-            {/* 剧情文本 */}
             {log.narrative !== '...' && (
-                <div className="text-sm font-serif leading-7 text-slate-300 tracking-wide text-justify bg-slate-900/30 p-2 rounded-lg border border-slate-800/30">
+                <div className="text-sm font-serif leading-relaxed text-slate-300 bg-slate-900/40 p-3 rounded-lg border-l-2 border-slate-700">
                     {log.narrative}
                 </div>
             )}
           </div>
         ))}
-        {loading && <div className="flex justify-center py-4"><Loader2 className="w-5 h-5 text-slate-600 animate-spin"/></div>}
+        {loading && <div className="flex justify-center"><Sparkles className="w-5 h-5 text-amber-500 animate-pulse" /></div>}
       </div>
 
-      {/* --- 底部控制台 (Controls) --- */}
-      <div className="bg-slate-900/95 backdrop-blur border-t border-slate-800 p-4 pb-8 absolute bottom-0 w-full z-20 flex flex-col gap-4 shadow-[0_-10px_40px_rgba(0,0,0,0.5)]">
+      {/* --- 底部决策面板 (Action Deck) --- */}
+      <div className="absolute bottom-0 w-full bg-slate-900/95 backdrop-blur-md border-t border-slate-800 p-5 z-20 shadow-[0_-10px_50px_rgba(0,0,0,0.7)]">
+        <div className="mb-2 flex justify-between items-center">
+            <span className="text-[10px] text-slate-500 uppercase tracking-widest font-bold">待决策事项</span>
+            {player.level > 1 && <span className="text-[10px] text-amber-600 font-bold">LV.{player.level}</span>}
+        </div>
         
-        {/* 1. 智能推荐按钮区 */}
-        <div className="flex gap-2 overflow-x-auto no-scrollbar pb-1 mask-linear-fade">
-            {/* 自动探索按钮 */}
-            <button 
-                onClick={() => handleAction("", true)}
-                disabled={loading}
-                className="flex-shrink-0 flex items-center gap-1 bg-amber-950/50 text-amber-500 border border-amber-900/50 px-3 py-1.5 rounded-full text-xs font-bold hover:bg-amber-900 hover:text-amber-200 transition-all active:scale-95"
-            >
-                <Zap className="w-3 h-3 fill-current" /> 自动探索
-            </button>
-            
-            {/* AI 生成的动态建议 */}
-            {suggestions.map((s, i) => (
+        {/* 动态选项卡片 */}
+        <div className="grid grid-cols-1 gap-3">
+            {options.map((opt, idx) => (
                 <button 
-                    key={i}
-                    onClick={() => handleAction(s)}
+                    key={idx}
+                    onClick={() => handleChoice(opt)}
                     disabled={loading}
-                    className="flex-shrink-0 bg-slate-800 text-slate-300 border border-slate-700 px-3 py-1.5 rounded-full text-xs hover:bg-slate-700 hover:text-white transition-all active:scale-95"
+                    className={`
+                        w-full text-left p-3 rounded-lg border transition-all active:scale-95 group
+                        ${opt.type === 'combat' ? 'bg-red-950/30 border-red-900/50 hover:bg-red-900/50' : 
+                          opt.type === 'craft' ? 'bg-amber-950/30 border-amber-900/50 hover:bg-amber-900/50' :
+                          'bg-slate-800/50 border-slate-700/50 hover:bg-slate-800'}
+                    `}
                 >
-                    {s}
+                    <div className="flex justify-between items-center">
+                        <span className="text-sm font-bold text-slate-200 group-hover:text-white transition-colors">
+                            {opt.label}
+                        </span>
+                        {/* 风险指示器 */}
+                        {opt.risk === 'high' && <span className="text-[10px] bg-red-950 text-red-400 px-1.5 rounded">高危</span>}
+                        {opt.risk === 'none' && <span className="text-[10px] bg-emerald-950 text-emerald-400 px-1.5 rounded">安全</span>}
+                    </div>
                 </button>
             ))}
         </div>
 
-        {/* 2. 传统输入框 (保留微操能力) */}
-        <div className="flex gap-2 relative">
-            <input 
-                type="text" 
-                value={input}
-                onChange={(e) => setInput(e.target.value)}
-                onKeyDown={(e) => e.key === 'Enter' && handleAction(input)}
-                placeholder="或者输入指令..."
-                className="w-full bg-slate-950 border border-slate-800 rounded-lg px-4 py-3 text-sm focus:outline-none focus:border-amber-900/50 focus:ring-1 focus:ring-amber-900/50 transition-all placeholder:text-slate-700"
-            />
-            <button 
-                onClick={() => handleAction(input)}
-                disabled={loading}
-                className="absolute right-2 top-2 bg-slate-800 hover:bg-slate-700 text-slate-200 p-1.5 rounded-md transition-colors"
-            >
-                {loading ? <Loader2 className="w-4 h-4 animate-spin"/> : <Send className="w-4 h-4" />}
-            </button>
-        </div>
-
-        {/* 3. 底部导航栏 */}
-        <div className="flex justify-around pt-2 border-t border-slate-800/50 mt-1">
-            <button className="flex flex-col items-center gap-1 text-slate-500 hover:text-slate-200 transition-colors"><Map className="w-4 h-4" /><span className="text-[10px] font-bold">MAP</span></button>
-            <button className="flex flex-col items-center gap-1 text-slate-500 hover:text-slate-200 transition-colors"><Backpack className="w-4 h-4" /><span className="text-[10px] font-bold">BAG</span></button>
-            <button className="flex flex-col items-center gap-1 text-slate-500 hover:text-slate-200 transition-colors"><Hammer className="w-4 h-4" /><span className="text-[10px] font-bold">CRAFT</span></button>
+        {/* 底部导航图标 (保留功能入口，暂未实现具体逻辑) */}
+        <div className="flex justify-center gap-8 mt-5 opacity-50">
+            <Map className="w-5 h-5 text-slate-500" />
+            <Backpack className="w-5 h-5 text-slate-500" />
+            <Scroll className="w-5 h-5 text-slate-500" />
         </div>
       </div>
     </div>
