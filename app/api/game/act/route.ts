@@ -10,51 +10,58 @@ const DEMO_USER_ID = 'demo-user-001';
 
 export async function POST(req: Request) {
   try {
-    // 不需要接收 action 参数了，AI 自己决定
-    
-    // 1. 获取玩家全量数据
+    // 1. 获取玩家数据
     const { data: player } = await supabase.from('players').select('*').eq('user_id', DEMO_USER_ID).single();
-    if (!player) return NextResponse.json({ error: 'Player not found' }, { status: 404 });
-
-    // 如果玩家死了，重置游戏
-    if (player.hp <= 0) {
-        await supabase.from('players').update({ 
-            hp: 100, level: 1, exp: 0, inventory: [], attributes: {"str":5,"dex":5,"int":5}, location: '废土重生点' 
-        }).eq('id', player.id);
-        return NextResponse.json({ 
-            narrative: "生命信号消失... 正在克隆新的素体... 游戏重置。", 
-            action_taken: "系统重置",
-            state: { hp: 100, location: '废土重生点' } 
-        });
+    
+    // 死亡重置逻辑
+    if (!player || player.hp <= 0) {
+       const resetState = { 
+           hp: 100, level: 1, exp: 0, 
+           inventory: [], 
+           equipment: { weapon: null, armor: null, accessory: null },
+           location: '新手村重生点' 
+       };
+       await supabase.from('players').update(resetState).eq('id', player?.id);
+       return NextResponse.json({ narrative: "你已死亡。女神将你复活在新手村...", state: resetState });
     }
 
-    // 2. AI 大脑核心 (DeepSeek)
-    // 这是一个"自律智能体" Prompt
+    // 2. AI 大脑 (DeepSeek) - RPG 2.0 引擎
     const logicPrompt = `
-      [模拟目标: 全自动生存]
-      你是一个拥有完全自由意志的废土幸存者。请根据当前状态，自主决定下一步最有意义的行动。
+      [角色] LV:${player.level} HP:${player.hp}
+      [属性] STR:${player.attributes.str} DEX:${player.attributes.dex} INT:${player.attributes.int}
+      [装备] ${JSON.stringify(player.equipment)}
+      [背包] ${JSON.stringify(player.inventory)}
+      [位置] ${player.location}
       
-      [当前状态]
-      HP:${player.hp} | LV:${player.level} | 属性:${JSON.stringify(player.attributes)}
-      时间:${player.time_of_day} | 地点:${player.location}
-      背包:${JSON.stringify(player.inventory)}
+      作为全自动 RPG 引擎，请基于当前状态决策下一步。
       
-      [决策逻辑优先级]
-      1. **生存**: HP < 30 时，必须寻找食物或休息。
-      2. **制作**: 检查背包。如果有木头+石头，必须合成"石斧"；有草药，必须合成"绷带"。
-      3. **成长**: 只有状态良好时才去战斗或探索危险区域。
-      4. **清理**: 背包满了(>5个物品)则丢弃无用杂物。
+      [规则库]
+      1. **探索与战斗**: 
+         - 如果在野外，随机遭遇敌人 (哥布林/野狼/甚至巨龙)。
+         - 战斗公式: 伤害 = STR * 2 + 武器攻击力。
+         - 战斗胜利: 获得 EXP 和 随机物品 (Loot)。
+      2. **物品生成 (Loot System)**:
+         - 物品必须是对象结构: { "name": "物品名", "type": "weapon/armor/material", "stats": { "atk": 5 }, "rarity": "common/rare/epic" }
+         - 名字要丰富，如 "破碎的哥布林骨头", "锋利的精铁长剑"。
+      3. **自动装备 (Auto-Equip)**:
+         - 如果背包里有比当前装备更强的装备，必须立即装备上，并将旧装备放入背包。
+      4. **制作 (Crafting)**:
+         - 检查背包材料。如: 3个"铁矿" -> 制作 "铁剑"。
 
-      请严格以JSON格式输出你的决策与结果:
+      请严格以 JSON 输出:
       {
-        "thought_process": "我的一句话内心独白(为什么做这个决定)",
-        "action_name": "具体的动作名称(如: 制作石斧)",
-        "narrative_outcome": "动作的物理结果描述",
-        "hp_change": number,   // 战斗扣血，休息加血
-        "exp_gain": number,    // 只有有意义的行动才加经验
-        "new_location": string, // 仅在移动时改变
-        "inventory_updates": { "add": ["物品名"], "remove": ["物品名"] },
-        "attribute_growth": { "str": 0, "dex": 0 } // 成功行动微量提升属性
+        "thought": "简短决策理由",
+        "action_type": "combat/explore/craft/rest",
+        "narrative": "战斗或探索的详细描述(30字)",
+        "state_update": {
+            "hp_change": -10,
+            "exp_gain": 50,
+            "new_location": "当前或新坐标名",
+            "map_node_data": { "name": "森林深处", "type": "forest", "x": 1, "y": 2 }, // 仅在移动时生成
+            "inventory_add": [], // 新获得的物品对象列表
+            "inventory_remove_indices": [], // 消耗物品的索引
+            "equipment_update": { "weapon": { ... } } // 如果更换了装备
+        }
       }
     `;
     
@@ -64,7 +71,7 @@ export async function POST(req: Request) {
       body: JSON.stringify({
         model: process.env.VOLC_MODEL_ID, 
         messages: [{ role: "user", content: logicPrompt }],
-        temperature: 0.3, // 稍微提高一点创造力
+        temperature: 0.4, // 增加随机性以生成多样装备
         response_format: { type: "json_object" }
       })
     });
@@ -72,92 +79,82 @@ export async function POST(req: Request) {
     const logicJson = await logicRes.json();
     const outcome = JSON.parse(logicJson.choices[0].message.content);
 
-    // 3. 剧情渲染 (Qwen)
-    const storyPrompt = `
-      [风格: 黑暗、电影感、第三人称]
-      幸存者决定: ${outcome.action_name}
-      内心想法: ${outcome.thought_process}
-      物理结果: ${outcome.narrative_outcome}
-      
-      请生成一段 60 字以内的实时日志。
-    `;
-
-    const storyRes = await fetch('https://api.siliconflow.cn/v1/chat/completions', {
-      method: 'POST',
-      headers: { 'Authorization': `Bearer ${process.env.SILICON_KEY_INTERACTIVE}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: "Qwen/Qwen2.5-7B-Instruct",
-        messages: [{ role: "user", content: storyPrompt }]
-      })
-    });
-    
-    const narrative = (await storyRes.json()).choices[0].message.content;
-
-    // 4. 数据库更新 (执行 AI 的决定)
-    // 处理背包
+    // 3. 数据处理 (复杂的背包与装备逻辑)
     let newInventory = [...(player.inventory || [])];
-    outcome.inventory_updates?.remove?.forEach((item: string) => {
-        const idx = newInventory.findIndex(i => item.includes(i) || i.includes(item)); 
-        if (idx > -1) newInventory.splice(idx, 1);
-    });
-    outcome.inventory_updates?.add?.forEach((item: string) => newInventory.push(item));
-
-    // 处理属性成长
-    let newAttr = { ...player.attributes };
-    if (outcome.attribute_growth) {
-        newAttr.str += outcome.attribute_growth.str || 0;
-        newAttr.dex += outcome.attribute_growth.dex || 0;
+    let newEquipment = { ...player.equipment };
+    
+    // 处理移除 (倒序移除防止索引错位)
+    if (outcome.state_update.inventory_remove_indices) {
+        outcome.state_update.inventory_remove_indices.sort((a:number, b:number) => b - a).forEach((idx:number) => {
+            if (idx < newInventory.length) newInventory.splice(idx, 1);
+        });
     }
     
-    // 升级逻辑
+    // 处理换装 (如果有新装备，把旧的脱下来放回背包)
+    if (outcome.state_update.equipment_update) {
+        Object.entries(outcome.state_update.equipment_update).forEach(([slot, newItem]: [string, any]) => {
+            if (newEquipment[slot]) newInventory.push(newEquipment[slot]); // 旧装备回包
+            newEquipment[slot] = newItem; // 穿新装备
+        });
+    }
+
+    // 处理新增物品
+    if (outcome.state_update.inventory_add) {
+        newInventory.push(...outcome.state_update.inventory_add);
+    }
+    
+    // 处理升级
     let newLevel = player.level;
-    let newExp = player.exp + (outcome.exp_gain || 0);
+    let newExp = player.exp + (outcome.state_update.exp_gain || 0);
+    let newAttr = { ...player.attributes };
     if (newExp >= newLevel * 100) {
         newLevel++;
         newExp = 0;
-        // 升级回血
-        outcome.hp_change += 20; 
+        newAttr.str += 2; newAttr.dex += 1; // 升级属性成长
+        outcome.state_update.hp_change += 50; // 升级回血
     }
+    
+    const newHp = Math.min(100 + (newLevel * 10), Math.max(0, player.hp + (outcome.state_update.hp_change || 0)));
 
-    const newHp = Math.min(100, Math.max(0, player.hp + (outcome.hp_change || 0)));
-
-    // 时间流逝逻辑 (简单模拟)
-    const times = ['清晨', '正午', '黄昏', '深夜'];
-    let currentTime = player.time_of_day || '清晨';
-    if (Math.random() > 0.6) {
-        const idx = times.indexOf(currentTime);
-        currentTime = times[(idx + 1) % 4];
-    }
-
+    // 4. 数据库写入
+    // 4.1 更新玩家
     await supabase.from('players').update({
-        hp: newHp,
-        exp: newExp,
-        level: newLevel,
+        hp: newHp, exp: newExp, level: newLevel,
         attributes: newAttr,
         inventory: newInventory,
-        location: outcome.new_location || player.location,
-        time_of_day: currentTime
+        equipment: newEquipment,
+        location: outcome.state_update.new_location || player.location
     }).eq('id', player.id);
 
+    // 4.2 记录日志
     await supabase.from('game_logs').insert({
         player_id: player.id,
-        action: `[AI] ${outcome.action_name}`, // 标记这是 AI 自动做的
-        narrative: narrative
+        action: `[${outcome.action_type}]`, 
+        narrative: outcome.narrative
     });
 
-    return NextResponse.json({ 
-        narrative, 
-        action_name: outcome.action_name,
-        thought: outcome.thought_process, // 返回 AI 的思考过程
-        state: { 
-            hp: newHp, 
-            level: newLevel, 
-            exp: newExp, 
-            attributes: newAttr, 
-            location: outcome.new_location || player.location,
-            time_of_day: currentTime,
-            inventory: newInventory
+    // 4.3 如果探索了新地点，记录到地图表
+    if (outcome.state_update.map_node_data) {
+        const node = outcome.state_update.map_node_data;
+        // 简单去重逻辑：如果坐标不存在则插入
+        const { data: exist } = await supabase.from('map_nodes').select('id')
+            .match({ player_id: player.id, name: node.name }).single();
+        
+        if (!exist) {
+            await supabase.from('map_nodes').insert({
+                player_id: player.id,
+                name: node.name,
+                type: node.type,
+                coordinate_x: node.x,
+                coordinate_y: node.y
+            });
         }
+    }
+
+    return NextResponse.json({ 
+        narrative: outcome.narrative, 
+        thought: outcome.thought,
+        state: { hp: newHp, level: newLevel, exp: newExp, inventory: newInventory, equipment: newEquipment }
     });
 
   } catch (e: any) {
