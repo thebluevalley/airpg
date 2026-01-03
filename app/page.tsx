@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useRef } from 'react';
 import { createClient } from '@supabase/supabase-js';
-import { Map, Backpack, User, Zap, Shield, Sparkles, Scroll } from 'lucide-react';
+import { Map, Backpack, User, Sparkles, Scroll } from 'lucide-react';
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -17,7 +17,7 @@ export default function GamePage() {
   const [player, setPlayer] = useState<any>(null);
   const [showStats, setShowStats] = useState(false); // 属性面板开关
   
-  // AI 生成的选项，不再是硬编码的
+  // AI 生成的选项
   const [options, setOptions] = useState<any[]>([
       { label: "醒来，观察四周", type: "explore", risk: "none" }
   ]);
@@ -38,14 +38,15 @@ export default function GamePage() {
     if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
   }, [logs]);
 
-  // 核心交互：点击选项
+  // --- 核心修复在这里 ---
   const handleChoice = async (opt: any) => {
     if (loading) return;
     setLoading(true);
 
     // 乐观更新
     const tempLog = { id: Date.now(), action: opt.label, narrative: '...', isTemp: true };
-    setLogs(prev => [...prev, tempLog]);
+    // Fix: 显式标记 prev 为数组
+    setLogs((prev: any[]) => [...prev, tempLog]);
 
     try {
       const res = await fetch('/api/game/act', {
@@ -55,8 +56,11 @@ export default function GamePage() {
       });
       const data = await res.json();
 
-      setPlayer(prev => ({ ...prev, ...data.state }));
-      setLogs(prev => prev.map(l => l.id === tempLog.id ? { ...l, narrative: data.narrative, isTemp: false } : l));
+      // Fix: 显式标记 prev 为 any
+      setPlayer((prev: any) => ({ ...prev, ...data.state }));
+      
+      // Fix: 显式标记 prev 为数组
+      setLogs((prev: any[]) => prev.map(l => l.id === tempLog.id ? { ...l, narrative: data.narrative, isTemp: false } : l));
       
       // 更新为 AI 思考后的新选项
       if (data.options && data.options.length > 0) {
