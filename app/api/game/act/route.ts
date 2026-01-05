@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
-import { GameEngine, RECIPES } from '@/lib/game/engine'; // 引入刚才写的引擎
+import { GameEngine, RECIPES } from '@/lib/game/engine';
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -26,7 +26,6 @@ export async function POST(req: Request) {
     const pY = player.coordinate_y || 0;
 
     // --- 层级一：DeepSeek (决策层 Intent Layer) ---
-    // AI 只负责决定"做什么"，不负责"结果是什么"
     const logicPrompt = `
       [状态] HP:${player.hp} | Loc: (${pX}, ${pY}) ${player.location}
       [背包] ${JSON.stringify(player.inventory)}
@@ -51,7 +50,7 @@ export async function POST(req: Request) {
       body: JSON.stringify({
         model: process.env.VOLC_MODEL_ID, 
         messages: [{ role: "user", content: logicPrompt }],
-        temperature: 0.1, // 低温，保证逻辑稳定
+        temperature: 0.1, 
         response_format: { type: "json_object" }
       })
     });
@@ -59,7 +58,6 @@ export async function POST(req: Request) {
     const decision = JSON.parse(intentJson.choices[0].message.content);
 
     // --- 层级二：GameEngine (模拟层 Simulation Layer) ---
-    // 这里是"硬规则"，AI 无法作弊
     let engineResult: any = { success: true, log: "" };
     let newState = { ...player };
     let mapNodeData = null;
@@ -81,7 +79,8 @@ export async function POST(req: Request) {
 
         // 3. 处理遭遇
         if (exploreResult.type === 'COMBAT') {
-            const combat = GameEngine.resolveCombat(player, exploreResult.enemy);
+            // FIX: 增加 ! 断言，确保 enemy 存在
+            const combat = GameEngine.resolveCombat(player, exploreResult.enemy!);
             newState.hp = combat.hp_remaining;
             if (combat.win) {
                 newState.exp += combat.exp_gain;
@@ -105,20 +104,16 @@ export async function POST(req: Request) {
     else if (decision.intent === 'CRAFT') {
         const craftRes = GameEngine.tryCraft(player.inventory, decision.params);
         if (craftRes.success) {
-            // 移除材料
-            // 这是一个简单的移除逻辑，实际可能需要更严谨的 ID 匹配
             let tempInv = [...(newState.inventory || [])];
             // 倒序移除
-            craftRes.indicesToRemove?.sort((a,b) => b-a).forEach(idx => tempInv.splice(idx, 1));
+            craftRes.indicesToRemove?.sort((a: number, b: number) => b - a).forEach((idx: number) => tempInv.splice(idx, 1));
             // 添加成品
             tempInv.push(craftRes.item);
             newState.inventory = tempInv;
             engineResult.log = `成功制作了 ${decision.params}！`;
             
-            // 如果是绷带，直接使用 (简化逻辑)
             if (decision.params === '绷带') {
                 newState.hp = Math.min(100, newState.hp + 30);
-                // 消耗掉刚做好的绷带
                 newState.inventory.pop();
                 engineResult.log += " 并立即使用恢复了 30 HP。";
             }
@@ -135,7 +130,6 @@ export async function POST(req: Request) {
     }
 
     // --- 层级三：Qwen (叙事层 Narrative Layer) ---
-    // 让 AI 润色引擎生硬的 log
     const storyPrompt = `
       [动作] ${decision.intent} -> ${decision.params}
       [结果] ${engineResult.log}
@@ -162,11 +156,10 @@ export async function POST(req: Request) {
     if (newState.exp >= newState.level * 100) {
         newState.level++;
         newState.exp = 0;
-        newState.attributes.str++; // 简单成长
-        newState.hp = 100; // 升级回满
+        newState.attributes.str++; 
+        newState.hp = 100; 
     }
 
-    // 更新玩家
     await supabase.from('players').update({
         hp: newState.hp,
         exp: newState.exp,
@@ -178,14 +171,12 @@ export async function POST(req: Request) {
         attributes: newState.attributes
     }).eq('id', player.id);
 
-    // 记录日志
     await supabase.from('game_logs').insert({
         player_id: player.id,
         action: `[AI] ${decision.intent} ${decision.params || ''}`,
         narrative: narrative
     });
 
-    // 记录地图节点
     if (mapNodeData) {
         const { data: exist } = await supabase.from('map_nodes').select('id')
             .match({ player_id: player.id, coordinate_x: mapNodeData.x, coordinate_y: mapNodeData.y }).single();
