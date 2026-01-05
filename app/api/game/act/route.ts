@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
+import { GameEngine, RECIPES } from '@/lib/game/engine'; // 引入刚才写的引擎
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -10,155 +11,200 @@ const DEMO_USER_ID = 'demo-user-001';
 
 export async function POST(req: Request) {
   try {
-    // 1. 获取玩家数据
+    // 1. 获取玩家与任务数据
     const { data: player } = await supabase.from('players').select('*').eq('user_id', DEMO_USER_ID).single();
     
-    // 死亡重置逻辑
     if (!player || player.hp <= 0) {
-       const resetState = { 
-           hp: 100, level: 1, exp: 0, 
-           inventory: [], 
-           equipment: { weapon: null, armor: null, accessory: null },
-           location: '新手村重生点' 
-       };
-       await supabase.from('players').update(resetState).eq('id', player?.id);
-       return NextResponse.json({ narrative: "你已死亡。女神将你复活在新手村...", state: resetState });
+        // 自动复活逻辑
+        const resetState = { hp: 100, level: 1, inventory: [], location: '基地', coordinate_x: 0, coordinate_y: 0 };
+        await supabase.from('players').update(resetState).eq('id', player?.id);
+        return NextResponse.json({ narrative: "生命体征恢复。系统重置完成。", state: resetState });
     }
 
-    // 2. AI 大脑 (DeepSeek) - RPG 2.0 引擎
-    const logicPrompt = `
-      [角色] LV:${player.level} HP:${player.hp}
-      [属性] STR:${player.attributes.str} DEX:${player.attributes.dex} INT:${player.attributes.int}
-      [装备] ${JSON.stringify(player.equipment)}
-      [背包] ${JSON.stringify(player.inventory)}
-      [位置] ${player.location}
-      
-      作为全自动 RPG 引擎，请基于当前状态决策下一步。
-      
-      [规则库]
-      1. **探索与战斗**: 
-         - 如果在野外，随机遭遇敌人 (哥布林/野狼/甚至巨龙)。
-         - 战斗公式: 伤害 = STR * 2 + 武器攻击力。
-         - 战斗胜利: 获得 EXP 和 随机物品 (Loot)。
-      2. **物品生成 (Loot System)**:
-         - 物品必须是对象结构: { "name": "物品名", "type": "weapon/armor/material", "stats": { "atk": 5 }, "rarity": "common/rare/epic" }
-         - 名字要丰富，如 "破碎的哥布林骨头", "锋利的精铁长剑"。
-      3. **自动装备 (Auto-Equip)**:
-         - 如果背包里有比当前装备更强的装备，必须立即装备上，并将旧装备放入背包。
-      4. **制作 (Crafting)**:
-         - 检查背包材料。如: 3个"铁矿" -> 制作 "铁剑"。
+    // 确保坐标存在
+    const pX = player.coordinate_x || 0;
+    const pY = player.coordinate_y || 0;
 
-      请严格以 JSON 输出:
+    // --- 层级一：DeepSeek (决策层 Intent Layer) ---
+    // AI 只负责决定"做什么"，不负责"结果是什么"
+    const logicPrompt = `
+      [状态] HP:${player.hp} | Loc: (${pX}, ${pY}) ${player.location}
+      [背包] ${JSON.stringify(player.inventory)}
+      [可用配方] ${Object.keys(RECIPES).join(', ')}
+      
+      作为生存AI，请决策下一步行动。
+      - 如果HP低，优先RAFT绷带或REST。
+      - 如果资源满，CRAFT工具。
+      - 否则 MOVE 探索 (方向 N/S/W/E)。
+      
+      请严格返回 JSON:
       {
-        "thought": "简短决策理由",
-        "action_type": "combat/explore/craft/rest",
-        "narrative": "战斗或探索的详细描述(30字)",
-        "state_update": {
-            "hp_change": -10,
-            "exp_gain": 50,
-            "new_location": "当前或新坐标名",
-            "map_node_data": { "name": "森林深处", "type": "forest", "x": 1, "y": 2 }, // 仅在移动时生成
-            "inventory_add": [], // 新获得的物品对象列表
-            "inventory_remove_indices": [], // 消耗物品的索引
-            "equipment_update": { "weapon": { ... } } // 如果更换了装备
-        }
+        "intent": "MOVE" | "CRAFT" | "REST",
+        "params": "N" (如果是移动) 或 "绷带" (如果是制作),
+        "reason": "简短理由"
       }
     `;
     
-    const logicRes = await fetch('https://ark.cn-beijing.volces.com/api/v3/chat/completions', {
+    const intentRes = await fetch('https://ark.cn-beijing.volces.com/api/v3/chat/completions', {
       method: 'POST',
       headers: { 'Authorization': `Bearer ${process.env.VOLC_API_KEY}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({
         model: process.env.VOLC_MODEL_ID, 
         messages: [{ role: "user", content: logicPrompt }],
-        temperature: 0.4, // 增加随机性以生成多样装备
+        temperature: 0.1, // 低温，保证逻辑稳定
         response_format: { type: "json_object" }
       })
     });
+    const intentJson = await intentRes.json();
+    const decision = JSON.parse(intentJson.choices[0].message.content);
 
-    const logicJson = await logicRes.json();
-    const outcome = JSON.parse(logicJson.choices[0].message.content);
+    // --- 层级二：GameEngine (模拟层 Simulation Layer) ---
+    // 这里是"硬规则"，AI 无法作弊
+    let engineResult: any = { success: true, log: "" };
+    let newState = { ...player };
+    let mapNodeData = null;
 
-    // 3. 数据处理 (复杂的背包与装备逻辑)
-    let newInventory = [...(player.inventory || [])];
-    let newEquipment = { ...player.equipment };
+    // A. 移动/探索逻辑
+    if (decision.intent === 'MOVE') {
+        const dir = decision.params;
+        const newX = pX + (dir === 'E' ? 1 : dir === 'W' ? -1 : 0);
+        const newY = pY + (dir === 'N' ? 1 : dir === 'S' ? -1 : 0);
+        
+        // 1. 计算新地形
+        const exploreResult = GameEngine.explore(newX, newY);
+        newState.coordinate_x = newX;
+        newState.coordinate_y = newY;
+        newState.location = exploreResult.biomeName;
+        
+        // 2. 记录地图节点
+        mapNodeData = { x: newX, y: newY, name: exploreResult.biomeName, type: exploreResult.biomeKey };
+
+        // 3. 处理遭遇
+        if (exploreResult.type === 'COMBAT') {
+            const combat = GameEngine.resolveCombat(player, exploreResult.enemy);
+            newState.hp = combat.hp_remaining;
+            if (combat.win) {
+                newState.exp += combat.exp_gain;
+                engineResult.log = `遭遇${exploreResult.enemy}！战斗胜利，HP剩余${combat.hp_remaining}。`;
+                if (combat.loot) {
+                    newState.inventory = [...(newState.inventory || []), { name: combat.loot, type: "material", rarity: "common" }];
+                    engineResult.log += ` 获得: ${combat.loot}`;
+                }
+            } else {
+                engineResult.log = `遭遇${exploreResult.enemy}，你不敌逃跑了。`;
+            }
+        } else if (exploreResult.type === 'GATHER') {
+            newState.inventory = [...(newState.inventory || []), { name: exploreResult.item, type: "material", rarity: "common" }];
+            engineResult.log = `你到达了${exploreResult.biomeName}，发现了一些${exploreResult.item}。`;
+        } else {
+            engineResult.log = `你来到了${exploreResult.biomeName}，这里一片荒芜。`;
+        }
+    } 
     
-    // 处理移除 (倒序移除防止索引错位)
-    if (outcome.state_update.inventory_remove_indices) {
-        outcome.state_update.inventory_remove_indices.sort((a:number, b:number) => b - a).forEach((idx:number) => {
-            if (idx < newInventory.length) newInventory.splice(idx, 1);
-        });
-    }
-    
-    // 处理换装 (如果有新装备，把旧的脱下来放回背包)
-    if (outcome.state_update.equipment_update) {
-        Object.entries(outcome.state_update.equipment_update).forEach(([slot, newItem]: [string, any]) => {
-            if (newEquipment[slot]) newInventory.push(newEquipment[slot]); // 旧装备回包
-            newEquipment[slot] = newItem; // 穿新装备
-        });
+    // B. 制作逻辑
+    else if (decision.intent === 'CRAFT') {
+        const craftRes = GameEngine.tryCraft(player.inventory, decision.params);
+        if (craftRes.success) {
+            // 移除材料
+            // 这是一个简单的移除逻辑，实际可能需要更严谨的 ID 匹配
+            let tempInv = [...(newState.inventory || [])];
+            // 倒序移除
+            craftRes.indicesToRemove?.sort((a,b) => b-a).forEach(idx => tempInv.splice(idx, 1));
+            // 添加成品
+            tempInv.push(craftRes.item);
+            newState.inventory = tempInv;
+            engineResult.log = `成功制作了 ${decision.params}！`;
+            
+            // 如果是绷带，直接使用 (简化逻辑)
+            if (decision.params === '绷带') {
+                newState.hp = Math.min(100, newState.hp + 30);
+                // 消耗掉刚做好的绷带
+                newState.inventory.pop();
+                engineResult.log += " 并立即使用恢复了 30 HP。";
+            }
+        } else {
+            engineResult.success = false;
+            engineResult.log = `制作失败: ${craftRes.reason}`;
+        }
     }
 
-    // 处理新增物品
-    if (outcome.state_update.inventory_add) {
-        newInventory.push(...outcome.state_update.inventory_add);
+    // C. 休息逻辑
+    else if (decision.intent === 'REST') {
+        newState.hp = Math.min(100, newState.hp + 10);
+        engineResult.log = "你原地休息了一会儿，体力有所恢复。";
     }
-    
-    // 处理升级
-    let newLevel = player.level;
-    let newExp = player.exp + (outcome.state_update.exp_gain || 0);
-    let newAttr = { ...player.attributes };
-    if (newExp >= newLevel * 100) {
-        newLevel++;
-        newExp = 0;
-        newAttr.str += 2; newAttr.dex += 1; // 升级属性成长
-        outcome.state_update.hp_change += 50; // 升级回血
-    }
-    
-    const newHp = Math.min(100 + (newLevel * 10), Math.max(0, player.hp + (outcome.state_update.hp_change || 0)));
 
-    // 4. 数据库写入
-    // 4.1 更新玩家
+    // --- 层级三：Qwen (叙事层 Narrative Layer) ---
+    // 让 AI 润色引擎生硬的 log
+    const storyPrompt = `
+      [动作] ${decision.intent} -> ${decision.params}
+      [结果] ${engineResult.log}
+      [状态] HP ${newState.hp}, 地点 ${newState.location}
+      
+      请把上面的[结果]扩写成一段沉浸式的微小说（50字左右）。
+      风格：末日生存、冷峻。
+    `;
+
+    const storyRes = await fetch('https://api.siliconflow.cn/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${process.env.SILICON_KEY_INTERACTIVE}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: "Qwen/Qwen2.5-7B-Instruct",
+        messages: [{ role: "user", content: storyPrompt }]
+      })
+    });
+    const narrativeData = await storyRes.json();
+    const narrative = narrativeData.choices[0].message.content;
+
+    // --- 4. 数据库更新 ---
+    
+    // 升级检查
+    if (newState.exp >= newState.level * 100) {
+        newState.level++;
+        newState.exp = 0;
+        newState.attributes.str++; // 简单成长
+        newState.hp = 100; // 升级回满
+    }
+
+    // 更新玩家
     await supabase.from('players').update({
-        hp: newHp, exp: newExp, level: newLevel,
-        attributes: newAttr,
-        inventory: newInventory,
-        equipment: newEquipment,
-        location: outcome.state_update.new_location || player.location
+        hp: newState.hp,
+        exp: newState.exp,
+        level: newState.level,
+        inventory: newState.inventory,
+        location: newState.location,
+        coordinate_x: newState.coordinate_x,
+        coordinate_y: newState.coordinate_y,
+        attributes: newState.attributes
     }).eq('id', player.id);
 
-    // 4.2 记录日志
+    // 记录日志
     await supabase.from('game_logs').insert({
         player_id: player.id,
-        action: `[${outcome.action_type}]`, 
-        narrative: outcome.narrative
+        action: `[AI] ${decision.intent} ${decision.params || ''}`,
+        narrative: narrative
     });
 
-    // 4.3 如果探索了新地点，记录到地图表
-    if (outcome.state_update.map_node_data) {
-        const node = outcome.state_update.map_node_data;
-        // 简单去重逻辑：如果坐标不存在则插入
+    // 记录地图节点
+    if (mapNodeData) {
         const { data: exist } = await supabase.from('map_nodes').select('id')
-            .match({ player_id: player.id, name: node.name }).single();
-        
+            .match({ player_id: player.id, coordinate_x: mapNodeData.x, coordinate_y: mapNodeData.y }).single();
         if (!exist) {
             await supabase.from('map_nodes').insert({
                 player_id: player.id,
-                name: node.name,
-                type: node.type,
-                coordinate_x: node.x,
-                coordinate_y: node.y
+                ...mapNodeData
             });
         }
     }
 
     return NextResponse.json({ 
-        narrative: outcome.narrative, 
-        thought: outcome.thought,
-        state: { hp: newHp, level: newLevel, exp: newExp, inventory: newInventory, equipment: newEquipment }
+        narrative, 
+        thought: `${decision.reason} (${engineResult.log})`, 
+        state: newState 
     });
 
   } catch (e: any) {
-    console.error(e);
+    console.error("Game Error:", e);
     return NextResponse.json({ error: e.message }, { status: 500 });
   }
 }
