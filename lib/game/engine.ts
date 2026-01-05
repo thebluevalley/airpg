@@ -21,7 +21,7 @@ const SUFFIXES = [
 export const BIOMES = {
   FOREST: { name: "迷雾森林", danger: 10, enemies: ["狂暴野猪", "剧毒蜘蛛", "暗影狼"] },
   MOUNTAIN: { name: "灰烬山脉", danger: 25, enemies: ["岩石巨人", "鹰身女妖", "双头食人魔"] },
-  DUNGEON: { name: "远古地牢", danger: 50, enemies: ["骷髅卫士", "死灵法师", "深渊恶魔"] } // 新增高危区域
+  DUNGEON: { name: "远古地牢", danger: 50, enemies: ["骷髅卫士", "死灵法师", "深渊恶魔"] }
 };
 
 // 基础装备模板
@@ -30,7 +30,7 @@ const BASE_ITEMS = {
     { name: "生锈短剑", baseAtk: 5 },
     { name: "精钢长剑", baseAtk: 12 },
     { name: "战斧", baseAtk: 18 },
-    { name: "黑曜石之刃", baseAtk: 30 } // 稀有底材
+    { name: "黑曜石之刃", baseAtk: 30 }
   ],
   armor: [
     { name: "破旧皮甲", baseDef: 2 },
@@ -49,8 +49,8 @@ export class GameEngine {
     const val = Math.sin(x * 12.9898 + y * 78.233) * 43758.5453;
     const hash = val - Math.floor(val);
     
-    // 只有特定坐标才是地牢入口
-    if (Math.abs(x) % 10 === 0 && Math.abs(y) % 10 === 0 && x !==0) return "DUNGEON"; 
+    // 只有特定坐标才是地牢入口 (每10格出现一个)
+    if (Math.abs(x) % 10 === 0 && Math.abs(y) % 10 === 0 && x !== 0) return "DUNGEON"; 
     if (hash > 0.7) return "MOUNTAIN";
     return "FOREST";
   }
@@ -58,6 +58,7 @@ export class GameEngine {
   // 暗黑破坏神式的掉落生成器
   static generateLoot(level: number, rarityBonus: number = 0) {
     const isWeapon = Math.random() > 0.5;
+    // 这里 pool 是联合类型
     const pool = isWeapon ? BASE_ITEMS.weapon : BASE_ITEMS.armor;
     
     // 1. 根据等级选底材
@@ -70,8 +71,12 @@ export class GameEngine {
     const item: any = { ...baseItem, type: isWeapon ? "weapon" : "armor", stats: {} };
     
     // 初始化基础数值
-    if (isWeapon) item.stats.atk = baseItem.baseAtk;
-    else item.stats.def = baseItem.baseDef;
+    // Fix: 使用 (baseItem as any) 强制类型断言，绕过 TS 检查
+    if (isWeapon) {
+        item.stats.atk = (baseItem as any).baseAtk;
+    } else {
+        item.stats.def = (baseItem as any).baseDef;
+    }
 
     // 2. 随机稀有度 (0-100)
     const roll = Math.random() * 100 + rarityBonus;
